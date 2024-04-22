@@ -5,7 +5,8 @@ use std::{
 };
 
 use chrono::{
-    DateTime, Datelike, Duration, Local, Month, NaiveDate, NaiveDateTime, NaiveTime, Weekday,
+    DateTime, Datelike, Duration, Local, Month, NaiveDate, NaiveDateTime, NaiveTime, TimeZone,
+    Weekday,
 };
 use pest::{iterators::Pair, Parser};
 use pest_derive::Parser;
@@ -33,26 +34,31 @@ pub enum ParseError {
 
 #[cfg(not(test))]
 /// Returns the current time in the local timezone.
-macro_rules! now {
-    () => {
-        Local::now()
-    };
+fn now<Tz>(timezone: &Tz) -> DateTime<Tz>
+where
+    Tz: TimeZone,
+{
+    Local::now().with_timezone(timezone)
 }
 
 #[cfg(test)]
 /// If we are in a test enviroment we will just pretend it is 2010-01-01 00:00:00 right now.
-macro_rules! now {
-    () => {
-        NaiveDateTime::parse_from_str("2010-01-01 00:00:00", "%Y-%m-%d %H:%M:%S")
-            .unwrap()
-            .and_local_timezone(Local)
-            .unwrap()
-    };
+fn now<Tz>(timezone: &Tz) -> DateTime<Tz>
+where
+    Tz: TimeZone,
+{
+    NaiveDateTime::parse_from_str("2010-01-01 00:00:00", "%Y-%m-%d %H:%M:%S")
+        .unwrap()
+        .and_local_timezone(timezone.to_owned())
+        .unwrap()
 }
 
 #[derive(Debug)]
-pub enum ParseResult {
-    DateTime(DateTime<Local>),
+pub enum ParseResult<Tz>
+where
+    Tz: TimeZone,
+{
+    DateTime(DateTime<Tz>),
     Date(NaiveDate),
     Time(NaiveTime),
 }
@@ -75,7 +81,8 @@ fn rules(v: &[Pair<'_, Rule>]) -> Vec<Rule> {
     v.iter().map(|pair| pair.as_rule()).collect()
 }
 
-/// Converts a human expression of a date into a more usable one.
+/// Converts a human expression of a date into a more usable one. 
+/// The ``timezone`` will be used as the 'perspective' to evaluete the expression from.
 ///
 /// # Errors
 ///
@@ -83,13 +90,17 @@ fn rules(v: &[Pair<'_, Rule>]) -> Vec<Rule> {
 ///
 /// # Examples
 /// ```
-/// let date = from_human_time("Last Friday at 19:45").unwrap();
-/// match date {
-///     ParseResult::DateTime(date) => println!("{date}"),
-///     _ => unreachable!()
+/// use chrono::Local;
+/// use human_date_parser::{from_human_time, ParseResult};
+///
+/// if let Ok(ParseResult::DateTime(date)) = from_human_time("Last Friday at 19:45", &Local){
+///     println!("{date}");
 /// }
 /// ```
-pub fn from_human_time(str: &str) -> Result<ParseResult, ParseError> {
+pub fn from_human_time<Tz>(str: &str, timezone: &Tz) -> Result<ParseResult<Tz>, ParseError>
+where
+    Tz: TimeZone,
+{
     let lowercase = str.to_lowercase();
     let mut parsed = match DateTimeParser::parse(Rule::HumanTime, &lowercase) {
         Ok(parsed) => parsed,
@@ -98,12 +109,12 @@ pub fn from_human_time(str: &str) -> Result<ParseResult, ParseError> {
 
     let head = parsed.next().unwrap();
     let rule = head.as_rule();
-    let result: ParseResult = match rule {
-        Rule::DateTime => ParseResult::DateTime(parse_datetime(head)?),
-        Rule::Date => ParseResult::Date(parse_date(head)?),
+    let result: ParseResult<Tz> = match rule {
+        Rule::DateTime => ParseResult::DateTime(parse_datetime(head, timezone)?),
+        Rule::Date => ParseResult::Date(parse_date(head, timezone)?),
         Rule::Time => ParseResult::Time(parse_time(head)?),
-        Rule::In | Rule::Ago => ParseResult::DateTime(parse_in_or_ago(head, rule)?),
-        Rule::Now => ParseResult::DateTime(now!()),
+        Rule::In | Rule::Ago => ParseResult::DateTime(parse_in_or_ago(head, rule, timezone)?),
+        Rule::Now => ParseResult::DateTime(now(timezone)),
         _ => unreachable!(),
     };
 
@@ -115,7 +126,10 @@ pub fn from_human_time(str: &str) -> Result<ParseResult, ParseError> {
 /// # Errors
 ///
 /// This function will return an error if the pair contains values than can not be parsed into a date.
-fn parse_datetime(head: Pair<Rule>) -> Result<DateTime<Local>, ParseError> {
+fn parse_datetime<Tz>(head: Pair<Rule>, timezone: &Tz) -> Result<DateTime<Tz>, ParseError>
+where
+    Tz: TimeZone,
+{
     let date;
     let time;
     let mut iter = head.into_inner();
@@ -123,15 +137,15 @@ fn parse_datetime(head: Pair<Rule>) -> Result<DateTime<Local>, ParseError> {
     let second = iter.next().unwrap();
 
     if first.as_rule() == Rule::Date {
-        date = parse_date(first)?;
+        date = parse_date(first, timezone)?;
         time = parse_time(second)?;
     } else {
-        date = parse_date(second)?;
+        date = parse_date(second, timezone)?;
         time = parse_time(first)?;
     }
 
     let date_time = NaiveDateTime::new(date, time);
-    let date_time = date_time.and_local_timezone(Local).unwrap();
+    let date_time = date_time.and_local_timezone(timezone.to_owned()).unwrap();
     Ok(date_time)
 }
 
@@ -140,15 +154,22 @@ fn parse_datetime(head: Pair<Rule>) -> Result<DateTime<Local>, ParseError> {
 /// # Errors
 ///
 /// This function will return an error if the pair contains values than can not be parsed into a date.
-fn parse_in_or_ago(head: Pair<Rule>, rule: Rule) -> Result<DateTime<Local>, ParseError> {
-    let durations = collect_durations(head.into_inner().next().unwrap())?;
+fn parse_in_or_ago<Tz>(
+    head: Pair<Rule>,
+    rule: Rule,
+    timezone: &Tz,
+) -> Result<DateTime<Tz>, ParseError>
+where
+    Tz: TimeZone,
+{
+    let durations = collect_durations(head.into_inner().next().unwrap(), timezone)?;
     let mut full_duration = Duration::zero();
     for duration in durations {
         full_duration = full_duration.add(duration);
     }
     Ok(match rule {
-        Rule::In => now!() + full_duration,
-        Rule::Ago => now!() - full_duration,
+        Rule::In => now(timezone) + full_duration,
+        Rule::Ago => now(timezone) - full_duration,
         _ => unreachable!(),
     })
 }
@@ -158,13 +179,16 @@ fn parse_in_or_ago(head: Pair<Rule>, rule: Rule) -> Result<DateTime<Local>, Pars
 /// # Errors
 ///
 /// This function will return an error if the pair contains values than can not be parsed into a `NaiveDate`.
-fn parse_date(pair: Pair<Rule>) -> Result<NaiveDate, ParseError> {
+fn parse_date<Tz>(pair: Pair<Rule>, timezone: &Tz) -> Result<NaiveDate, ParseError>
+where
+    Tz: TimeZone,
+{
     let date = pair.vec();
     match rules(&date)[..] {
-        [Rule::Today] => Ok(now!().date_naive()),
-        [Rule::Tomorrow] => Ok(now!().add(Duration::days(1)).date_naive()),
-        [Rule::Overmorrow] => Ok(now!().add(Duration::days(2)).date_naive()),
-        [Rule::Yesterday] => Ok(now!().sub(Duration::days(1)).date_naive()),
+        [Rule::Today] => Ok(now(timezone).date_naive()),
+        [Rule::Tomorrow] => Ok(now(timezone).add(Duration::days(1)).date_naive()),
+        [Rule::Overmorrow] => Ok(now(timezone).add(Duration::days(2)).date_naive()),
+        [Rule::Yesterday] => Ok(now(timezone).sub(Duration::days(1)).date_naive()),
         [Rule::IsoDate] => NaiveDate::from_str(date[0].as_str()).map_err(|e| match e.kind() {
             chrono::format::ParseErrorKind::Impossible => ParseError::ImpossibleDate,
             _ => ParseError::InvalidFormat,
@@ -177,7 +201,7 @@ fn parse_date(pair: Pair<Rule>) -> Result<NaiveDate, ParseError> {
 
             let year = match date.get(2) {
                 Some(rule) => parse_in_range(rule.as_str(), 0, 10000)?,
-                None => now!().year(),
+                None => now(timezone).year(),
             };
 
             let date = match NaiveDate::from_ymd_opt(year, month, day) {
@@ -188,11 +212,11 @@ fn parse_date(pair: Pair<Rule>) -> Result<NaiveDate, ParseError> {
         }
         [Rule::RelativeSpecifier, Rule::TimeUnit] => {
             let unit = date[1].clone_vec()[0].as_rule();
-            let duration = create_duration(unit, 1)?;
+            let duration = create_duration(unit, 1, timezone)?;
             match date[0].clone_vec()[0].as_rule() {
-                Rule::This => Ok(now!().date_naive()),
-                Rule::Next => Ok(now!().add(duration).date_naive()),
-                Rule::Last => Ok(now!().sub(duration).date_naive()),
+                Rule::This => Ok(now(timezone).date_naive()),
+                Rule::Next => Ok(now(timezone).add(duration).date_naive()),
+                Rule::Last => Ok(now(timezone).sub(duration).date_naive()),
                 _ => unreachable!(),
             }
         }
@@ -207,7 +231,7 @@ fn parse_date(pair: Pair<Rule>) -> Result<NaiveDate, ParseError> {
             };
 
             let weekday = weekday_from_rule(specific_weekday);
-            let now = now!().date_naive();
+            let now = now(timezone).date_naive();
             match specifier {
                 Rule::This => Ok(find_weekday(now, weekday)),
                 Rule::Next => Ok(find_weekday(now.add(Duration::days(7)), weekday)),
@@ -218,7 +242,11 @@ fn parse_date(pair: Pair<Rule>) -> Result<NaiveDate, ParseError> {
         [Rule::Weekday] => {
             let specific_weekday = date[0].clone_vec()[0].as_rule();
             let weekday = weekday_from_rule(specific_weekday);
-            Ok(find_next_weekday_occurence(now!().date_naive(), weekday))
+            Ok(find_next_weekday_occurence(
+                now(timezone).date_naive(),
+                weekday,
+                timezone,
+            ))
         }
         _ => unreachable!(),
     }
@@ -231,8 +259,11 @@ fn find_weekday(date: NaiveDate, weekday: Weekday) -> NaiveDate {
 }
 
 /// Finds the next occurence of the weekday
-fn find_next_weekday_occurence(date: NaiveDate, weekday: Weekday) -> NaiveDate {
-    let current = now!().weekday().num_days_from_monday();
+fn find_next_weekday_occurence<Tz>(date: NaiveDate, weekday: Weekday, timezone: &Tz) -> NaiveDate
+where
+    Tz: TimeZone,
+{
+    let current = now(timezone).weekday().num_days_from_monday();
     let next = weekday.num_days_from_monday();
 
     let days_to_add = if current < next {
@@ -290,7 +321,13 @@ where
 /// # Errors
 ///
 /// This function will return an error if the pair contains invalid durations.
-fn collect_durations(duration_rule: Pair<Rule>) -> Result<Vec<Duration>, ParseError> {
+fn collect_durations<Tz>(
+    duration_rule: Pair<Rule>,
+    timezone: &Tz,
+) -> Result<Vec<Duration>, ParseError>
+where
+    Tz: TimeZone,
+{
     let mut durations = Vec::new();
 
     for rule in duration_rule.into_inner() {
@@ -316,7 +353,7 @@ fn collect_durations(duration_rule: Pair<Rule>) -> Result<Vec<Duration>, ParseEr
                     }
                 }
 
-                durations.push(create_duration(time_type, amount)?);
+                durations.push(create_duration(time_type, amount, timezone)?);
             }
             Rule::SingleUnit => {
                 for inner in rule.into_inner() {
@@ -324,6 +361,7 @@ fn collect_durations(duration_rule: Pair<Rule>) -> Result<Vec<Duration>, ParseEr
                         durations.push(create_duration(
                             inner.into_inner().next().unwrap().as_rule(),
                             1,
+                            timezone,
                         )?);
                     }
                 }
@@ -340,10 +378,13 @@ fn collect_durations(duration_rule: Pair<Rule>) -> Result<Vec<Duration>, ParseEr
 /// # Errors
 ///
 /// This function will return an error if the pair contains values than can not be parsed into a `Duration`.
-fn create_duration(rule: Rule, amount: i64) -> Result<Duration, ParseError> {
+fn create_duration<Tz>(rule: Rule, amount: i64, timezone: &Tz) -> Result<Duration, ParseError>
+where
+    Tz: TimeZone,
+{
     let dur = match rule {
         Rule::Year => {
-            let now = now!();
+            let now = now(timezone);
             let years: i32 = match amount.try_into() {
                 Ok(years) => years,
                 Err(_) => {
@@ -363,7 +404,7 @@ fn create_duration(rule: Rule, amount: i64) -> Result<Duration, ParseError> {
             next_year - now
         }
         Rule::Month => {
-            let now = now!();
+            let now = now(timezone);
             let months: u32 = match amount.try_into() {
                 Ok(months) => months,
                 Err(_) => {
@@ -451,13 +492,14 @@ mod tests {
                     #[test]
                     fn fn_name () {
                         let input = $case.to_lowercase();
-                        let result = from_human_time(&input).unwrap();
-                        let expected = NaiveDateTime::parse_from_str( $expected , "%Y-%m-%d %H:%M:%S").unwrap().and_local_timezone(Local).unwrap();
+                        let timezone = Local;
+                        let result = from_human_time(&input, &timezone).unwrap();
+                        let expected = NaiveDateTime::parse_from_str( $expected , "%Y-%m-%d %H:%M:%S").unwrap().and_local_timezone(timezone.to_owned()).unwrap();
 
                         let result = match result {
                             ParseResult::DateTime(datetime) => datetime,
-                            ParseResult::Date(date) => NaiveDateTime::new(date, now!().time()).and_local_timezone(Local).unwrap(),
-                            ParseResult::Time(time) => NaiveDateTime::new(now!().date_naive(), time).and_local_timezone(Local).unwrap(),
+                            ParseResult::Date(date) => NaiveDateTime::new(date, now(&timezone).time()).and_local_timezone(timezone.to_owned()).unwrap(),
+                            ParseResult::Time(time) => NaiveDateTime::new(now(&timezone).date_naive(), time).and_local_timezone(timezone.to_owned()).unwrap(),
                         };
 
                         println!("Result: {result}\nExpected: {expected}\nNote: Maximum difference between these values allowed is 10ms.");
@@ -476,7 +518,8 @@ mod tests {
                     #[test]
                     fn fn_name () {
                         let input = $case.to_lowercase();
-                        let result = from_human_time(&input);
+                        let timezone = Local;
+                        let result = from_human_time(&input, &timezone);
 
                         println!("Result: {result:#?}\nExpected: Error");
                         assert!(result.is_err());

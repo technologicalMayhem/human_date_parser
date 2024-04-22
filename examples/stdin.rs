@@ -5,13 +5,14 @@ use human_date_parser::ParseResult;
 
 fn main() {
     let mut buffer = String::new();
+    let timezone = Local;
     let stdin = stdin();
 
     println!("Describe a date or time:");
     loop {
         buffer.clear();
         stdin.read_line(&mut buffer).unwrap();
-        let result = match human_date_parser::from_human_time(&buffer) {
+        let result = match human_date_parser::from_human_time(&buffer, &timezone) {
             Ok(time) => time,
             Err(e) => {
                 println!("{e}");
