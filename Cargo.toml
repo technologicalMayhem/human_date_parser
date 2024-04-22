@@ -15,4 +15,5 @@ pest_derive = "2"
 thiserror = "1.0.38"
 
 [dev-dependencies]
+chrono-tz = "0.9.0"
 concat-idents = { git = "https://github.com/technologicalMayhem/concat-idents" }
